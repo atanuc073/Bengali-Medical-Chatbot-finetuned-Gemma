@@ -139,6 +139,32 @@ try:
     
     # Enable attribute access: transformers.onnx.utils
     onnx_mock.utils = onnx_utils_mock
+    
+    # 5. Patch Cache objects for older models that expect past_key_values to be a tuple
+    try:
+        import transformers.cache_utils
+        def _cache_getitem(self, idx):
+            if hasattr(self, "key_cache") and hasattr(self, "value_cache"):
+                return (self.key_cache[idx], self.value_cache[idx])
+            raise KeyError(idx)
+        def _cache_len(self):
+            if hasattr(self, "key_cache"):
+                return len(self.key_cache)
+            return 0
+        def _cache_iter(self):
+            for i in range(len(self)):
+                yield self[i]
+        for cls_name in ["Cache", "DynamicCache", "EncoderDecoderCache"]:
+            if hasattr(transformers.cache_utils, cls_name):
+                cls = getattr(transformers.cache_utils, cls_name)
+                if not hasattr(cls, "__getitem__"):
+                    cls.__getitem__ = _cache_getitem
+                if not hasattr(cls, "__len__"):
+                    cls.__len__ = _cache_len
+                if not hasattr(cls, "__iter__"):
+                    cls.__iter__ = _cache_iter
+    except Exception:
+        pass
 except Exception:
     pass
 
