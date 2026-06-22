@@ -17,10 +17,20 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 # Workaround for compatibility between newer transformers versions and IndicTransToolkit
 try:
     import sys
+    from types import ModuleType
     import transformers.tokenization_utils_base
     import transformers.tokenization_utils
+    
+    # 1. Patch PreTrainedTokenizerBase
     transformers.tokenization_utils.PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
     sys.modules['transformers.tokenization_utils'].PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
+    
+    # 2. Mock removed transformers.onnx module
+    onnx_mock = ModuleType("transformers.onnx")
+    class DummyConfig: pass
+    onnx_mock.OnnxConfig = DummyConfig
+    onnx_mock.OnnxSeq2SeqConfigWithPast = DummyConfig
+    sys.modules["transformers.onnx"] = onnx_mock
 except Exception:
     pass
 
