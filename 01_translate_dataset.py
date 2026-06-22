@@ -71,10 +71,15 @@ try:
     import transformers.modeling_utils
     
     def apply_instance_tie_weights_wrapper(instance):
-        orig_tie = instance.tie_weights
+        if not hasattr(instance, "tie_weights"):
+            return None
+        orig_tie = getattr(instance, "tie_weights")
         import functools
         import inspect
-        sig = inspect.signature(orig_tie)
+        try:
+            sig = inspect.signature(orig_tie)
+        except (ValueError, TypeError):
+            return orig_tie
         if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             allowed_keys = set(sig.parameters.keys())
             @functools.wraps(orig_tie)
@@ -90,7 +95,7 @@ try:
         try:
             orig_init_weights(self)
         finally:
-            if hasattr(self, 'tie_weights') and self.tie_weights != orig_tie:
+            if orig_tie is not None and hasattr(self, 'tie_weights') and getattr(self, 'tie_weights', None) != orig_tie:
                 del self.tie_weights
     transformers.modeling_utils.PreTrainedModel.init_weights = custom_init_weights
     
@@ -104,7 +109,7 @@ try:
                 try:
                     return orig_func(cls, model, *args, **kwargs)
                 finally:
-                    if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
+                    if orig_tie is not None and hasattr(model, 'tie_weights') and getattr(model, 'tie_weights', None) != orig_tie:
                         del model.tie_weights
             transformers.modeling_utils.PreTrainedModel._finalize_model_loading = classmethod(custom_finalize_func)
         else:
@@ -114,7 +119,7 @@ try:
                 try:
                     return orig_func(cls, model, *args, **kwargs)
                 finally:
-                    if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
+                    if orig_tie is not None and hasattr(model, 'tie_weights') and getattr(model, 'tie_weights', None) != orig_tie:
                         del model.tie_weights
             transformers.modeling_utils.PreTrainedModel._finalize_model_loading = custom_finalize_func
     
