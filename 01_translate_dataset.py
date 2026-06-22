@@ -20,6 +20,7 @@ try:
     from types import ModuleType
     import transformers.tokenization_utils_base
     import transformers.tokenization_utils
+    import transformers.dynamic_module_utils
     
     # 1. Patch PreTrainedTokenizerBase
     transformers.tokenization_utils.PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
@@ -34,14 +35,32 @@ try:
         return orig_getattr(self, name)
     transformers.tokenization_utils_base.PreTrainedTokenizerBase.__getattr__ = new_getattr
     
-    # 2. Mock removed transformers.onnx module
+    # 2. Patch dynamic module loading to wrap tie_weights if overridden
+    orig_get_class = transformers.dynamic_module_utils.get_class_from_dynamic_module
+    def custom_get_class(*args, **kwargs):
+        cls = orig_get_class(*args, **kwargs)
+        if hasattr(cls, "tie_weights"):
+            orig_tie = cls.tie_weights
+            import functools
+            import inspect
+            @functools.wraps(orig_tie)
+            def wrapped_tie(self, *args, **kwargs):
+                sig = inspect.signature(orig_tie)
+                if 'recompute_mapping' not in sig.parameters and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                    kwargs.pop('recompute_mapping', None)
+                return orig_tie(self, *args, **kwargs)
+            cls.tie_weights = wrapped_tie
+        return cls
+    transformers.dynamic_module_utils.get_class_from_dynamic_module = custom_get_class
+    
+    # 3. Mock removed transformers.onnx module
     onnx_mock = ModuleType("transformers.onnx")
     class DummyConfig: pass
     onnx_mock.OnnxConfig = DummyConfig
     onnx_mock.OnnxSeq2SeqConfigWithPast = DummyConfig
     sys.modules["transformers.onnx"] = onnx_mock
     
-    # 3. Mock transformers.onnx.utils submodule
+    # 4. Mock transformers.onnx.utils submodule
     onnx_utils_mock = ModuleType("transformers.onnx.utils")
     def compute_effective_axis_dimension(*args, **kwargs):
         pass
