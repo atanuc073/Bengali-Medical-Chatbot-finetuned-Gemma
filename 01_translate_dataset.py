@@ -95,20 +95,28 @@ try:
     transformers.modeling_utils.PreTrainedModel.init_weights = custom_init_weights
     
     # Also patch _finalize_model_loading as it calls tie_weights directly
-    if hasattr(transformers.modeling_utils.PreTrainedModel, "_finalize_model_loading"):
-        orig_finalize = transformers.modeling_utils.PreTrainedModel._finalize_model_loading
-        @classmethod
-        def custom_finalize(cls, model, *args, **kwargs):
-            orig_tie = apply_instance_tie_weights_wrapper(model)
-            try:
-                if hasattr(orig_finalize, '__func__'):
-                    return orig_finalize.__func__(cls, model, *args, **kwargs)
-                else:
-                    return orig_finalize(cls, model, *args, **kwargs)
-            finally:
-                if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
-                    del model.tie_weights
-        transformers.modeling_utils.PreTrainedModel._finalize_model_loading = custom_finalize
+    finalize_desc = transformers.modeling_utils.PreTrainedModel.__dict__.get("_finalize_model_loading")
+    if finalize_desc is not None:
+        if isinstance(finalize_desc, classmethod):
+            orig_func = finalize_desc.__func__
+            def custom_finalize_func(cls, model, *args, **kwargs):
+                orig_tie = apply_instance_tie_weights_wrapper(model)
+                try:
+                    return orig_func(cls, model, *args, **kwargs)
+                finally:
+                    if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
+                        del model.tie_weights
+            transformers.modeling_utils.PreTrainedModel._finalize_model_loading = classmethod(custom_finalize_func)
+        else:
+            orig_func = finalize_desc
+            def custom_finalize_func(cls, model, *args, **kwargs):
+                orig_tie = apply_instance_tie_weights_wrapper(model)
+                try:
+                    return orig_func(cls, model, *args, **kwargs)
+                finally:
+                    if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
+                        del model.tie_weights
+            transformers.modeling_utils.PreTrainedModel._finalize_model_loading = custom_finalize_func
     
     # 3. Mock removed transformers.onnx module
     onnx_mock = ModuleType("transformers.onnx")
