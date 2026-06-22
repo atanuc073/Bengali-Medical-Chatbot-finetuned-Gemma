@@ -25,6 +25,15 @@ try:
     transformers.tokenization_utils.PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
     sys.modules['transformers.tokenization_utils'].PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
     
+    # Patch __getattr__ on PreTrainedTokenizerBase for _special_tokens_map
+    orig_getattr = transformers.tokenization_utils_base.PreTrainedTokenizerBase.__getattr__
+    def new_getattr(self, name):
+        if name == "_special_tokens_map":
+            self.__dict__["_special_tokens_map"] = {}
+            return self.__dict__["_special_tokens_map"]
+        return orig_getattr(self, name)
+    transformers.tokenization_utils_base.PreTrainedTokenizerBase.__getattr__ = new_getattr
+    
     # 2. Mock removed transformers.onnx module
     onnx_mock = ModuleType("transformers.onnx")
     class DummyConfig: pass
