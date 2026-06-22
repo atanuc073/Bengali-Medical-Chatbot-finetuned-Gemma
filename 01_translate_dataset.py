@@ -49,17 +49,42 @@ def parse_args():
                         help="Translation batch size (default: 8)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from last checkpoint")
+    parser.add_argument("--hf_token", type=str, default=None,
+                        help="HuggingFace token for gated repositories")
     return parser.parse_args()
 
 
-def load_translation_model():
+def load_translation_model(hf_token=None):
     """Load IndicTrans2 model, tokenizer, and processor."""
+    token = hf_token or os.environ.get("HF_TOKEN")
+    
+    # Check Kaggle Secrets if not provided
+    if not token:
+        try:
+            from kaggle_secrets import UserSecretsClient
+            user_secrets = UserSecretsClient()
+            token = user_secrets.get_secret("HF_TOKEN")
+            if token:
+                os.environ["HF_TOKEN"] = token
+                print("🔑 Loaded HF_TOKEN from Kaggle Secrets.")
+        except Exception:
+            pass
+
+    if token:
+        try:
+            from huggingface_hub import login
+            login(token=token)
+            print("🔓 Logged in to Hugging Face successfully.")
+        except Exception as e:
+            print(f"⚠️ Failed to log in to Hugging Face: {e}")
+
     print(f"Loading IndicTrans2 model: {MODEL_NAME} ...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True, token=token)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         MODEL_NAME,
         trust_remote_code=True,
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16,
+        token=token
     ).to(DEVICE)
     model.eval()
     ip = IndicProcessor(inference=True)
@@ -84,8 +109,6 @@ def translate_batch(sentences, model, tokenizer, ip):
         return_tensors="pt",
         return_attention_mask=True
     ).to(DEVICE)
-
-
 
     # Generate
     with torch.no_grad():
@@ -126,7 +149,7 @@ def main():
         print(f"Resuming from index {start_idx}")
 
     # ── Load model ──
-    model, tokenizer, ip = load_translation_model()
+    model, tokenizer, ip = load_translation_model(hf_token=args.hf_token)
 
     # ── Translate in batches ──
     mode = "a" if args.resume and start_idx > 0 else "w"

@@ -45,6 +45,8 @@ def parse_args():
     parser.add_argument("--max_seq_length", type=int, default=MAX_SEQ_LENGTH)
     parser.add_argument("--save_gguf", action="store_true",
                         help="Also export model in GGUF format for Ollama/llama.cpp")
+    parser.add_argument("--hf_token", type=str, default=None,
+                        help="HuggingFace token for gated models")
     return parser.parse_args()
 
 
@@ -94,6 +96,29 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # ── HuggingFace Login for Gated Model access ──
+    token = args.hf_token or os.environ.get("HF_TOKEN")
+    
+    # Check Kaggle Secrets if not provided
+    if not token:
+        try:
+            from kaggle_secrets import UserSecretsClient
+            user_secrets = UserSecretsClient()
+            token = user_secrets.get_secret("HF_TOKEN")
+            if token:
+                os.environ["HF_TOKEN"] = token
+                print("🔑 Loaded HF_TOKEN from Kaggle Secrets.")
+        except Exception:
+            pass
+
+    if token:
+        try:
+            from huggingface_hub import login
+            login(token=token)
+            print("🔓 Logged in to Hugging Face successfully.")
+        except Exception as e:
+            print(f"⚠️ Failed to log in to Hugging Face: {e}")
+
     # ── Step 1: Load Model with Unsloth ──
     print(f"\n🚀 Loading model: {args.model_name}")
     model, tokenizer = FastModel.from_pretrained(
@@ -101,6 +126,7 @@ def main():
         max_seq_length=args.max_seq_length,
         load_in_4bit=True,          # QLoRA 4-bit quantization
         dtype=None,                 # Auto-detect (bf16 / fp16)
+        token=token,                # Pass token explicitly to FastModel
     )
 
     # ── Step 2: Configure LoRA adapters ──

@@ -29,12 +29,36 @@ def parse_args():
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--stream", action="store_true", default=True,
                         help="Stream output token by token")
+    parser.add_argument("--hf_token", type=str, default=None,
+                        help="HuggingFace token for gated models")
     return parser.parse_args()
 
 
-def load_model_unsloth(base_model, adapter_path, merged_path=None):
+def load_model_unsloth(base_model, adapter_path, merged_path=None, hf_token=None):
     """Load model using Unsloth's FastModel for optimized inference."""
     from unsloth import FastModel
+
+    token = hf_token or os.environ.get("HF_TOKEN")
+    
+    # Check Kaggle Secrets if not provided
+    if not token:
+        try:
+            from kaggle_secrets import UserSecretsClient
+            user_secrets = UserSecretsClient()
+            token = user_secrets.get_secret("HF_TOKEN")
+            if token:
+                os.environ["HF_TOKEN"] = token
+                print("🔑 Loaded HF_TOKEN from Kaggle Secrets.")
+        except Exception:
+            pass
+
+    if token:
+        try:
+            from huggingface_hub import login
+            login(token=token)
+            print("🔓 Logged in to Hugging Face successfully.")
+        except Exception as e:
+            print(f"⚠️ Failed to log in to Hugging Face: {e}")
 
     if merged_path:
         # Load the fully merged model directly
@@ -44,6 +68,7 @@ def load_model_unsloth(base_model, adapter_path, merged_path=None):
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
             dtype=None,
+            token=token,
         )
     else:
         # Load base + LoRA adapter
@@ -53,6 +78,7 @@ def load_model_unsloth(base_model, adapter_path, merged_path=None):
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
             dtype=None,
+            token=token,
         )
         print(f"Loading LoRA adapter: {adapter_path}")
         from peft import PeftModel
@@ -112,7 +138,7 @@ def generate_response(model, tokenizer, question, max_new_tokens=512, stream=Tru
 def main():
     args = parse_args()
     model, tokenizer = load_model_unsloth(
-        args.base_model, args.adapter_path, args.merged_path
+        args.base_model, args.adapter_path, args.merged_path, hf_token=args.hf_token
     )
 
     print("\n" + "=" * 60)
