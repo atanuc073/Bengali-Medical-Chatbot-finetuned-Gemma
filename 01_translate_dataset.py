@@ -51,7 +51,41 @@ try:
                 return orig_tie(self, *args, **kwargs)
             cls.tie_weights = wrapped_tie
         return cls
+    
     transformers.dynamic_module_utils.get_class_from_dynamic_module = custom_get_class
+    try:
+        import transformers.models.auto.auto_factory
+        transformers.models.auto.auto_factory.get_class_from_dynamic_module = custom_get_class
+    except Exception: pass
+    try:
+        import transformers.models.auto.configuration_auto
+        transformers.models.auto.configuration_auto.get_class_from_dynamic_module = custom_get_class
+    except Exception: pass
+    try:
+        import transformers.models.auto.tokenization_auto
+        transformers.models.auto.tokenization_auto.get_class_from_dynamic_module = custom_get_class
+    except Exception: pass
+    
+    # 2.b Fail-safe: Patch PreTrainedModel.init_weights to wrap tie_weights dynamically on instances
+    import transformers.modeling_utils
+    orig_init_weights = transformers.modeling_utils.PreTrainedModel.init_weights
+    def custom_init_weights(self):
+        orig_tie = self.tie_weights
+        import functools
+        import inspect
+        sig = inspect.signature(orig_tie)
+        if 'recompute_mapping' not in sig.parameters and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            @functools.wraps(orig_tie)
+            def temp_tie(*args, **kwargs):
+                kwargs.pop('recompute_mapping', None)
+                return orig_tie(*args, **kwargs)
+            self.tie_weights = temp_tie
+        try:
+            orig_init_weights(self)
+        finally:
+            if hasattr(self, 'tie_weights') and self.tie_weights != orig_tie:
+                del self.tie_weights
+    transformers.modeling_utils.PreTrainedModel.init_weights = custom_init_weights
     
     # 3. Mock removed transformers.onnx module
     onnx_mock = ModuleType("transformers.onnx")
