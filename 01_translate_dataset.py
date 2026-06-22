@@ -46,8 +46,9 @@ try:
             @functools.wraps(orig_tie)
             def wrapped_tie(self, *args, **kwargs):
                 sig = inspect.signature(orig_tie)
-                if 'recompute_mapping' not in sig.parameters and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                    kwargs.pop('recompute_mapping', None)
+                if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                    allowed_keys = set(sig.parameters.keys())
+                    kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
                 return orig_tie(self, *args, **kwargs)
             cls.tie_weights = wrapped_tie
         return cls
@@ -66,26 +67,45 @@ try:
         transformers.models.auto.tokenization_auto.get_class_from_dynamic_module = custom_get_class
     except Exception: pass
     
-    # 2.b Fail-safe: Patch PreTrainedModel.init_weights to wrap tie_weights dynamically on instances
+    # 2.b Fail-safe: Patch PreTrainedModel.init_weights and related tie_weights calls to wrap dynamically on instances
     import transformers.modeling_utils
-    orig_init_weights = transformers.modeling_utils.PreTrainedModel.init_weights
-    def custom_init_weights(self):
-        orig_tie = self.tie_weights
+    
+    def apply_instance_tie_weights_wrapper(instance):
+        orig_tie = instance.tie_weights
         import functools
         import inspect
         sig = inspect.signature(orig_tie)
-        if 'recompute_mapping' not in sig.parameters and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            allowed_keys = set(sig.parameters.keys())
             @functools.wraps(orig_tie)
             def temp_tie(*args, **kwargs):
-                kwargs.pop('recompute_mapping', None)
-                return orig_tie(*args, **kwargs)
-            self.tie_weights = temp_tie
+                filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_keys}
+                return orig_tie(*args, **filtered_kwargs)
+            instance.tie_weights = temp_tie
+        return orig_tie
+
+    orig_init_weights = transformers.modeling_utils.PreTrainedModel.init_weights
+    def custom_init_weights(self):
+        orig_tie = apply_instance_tie_weights_wrapper(self)
         try:
             orig_init_weights(self)
         finally:
             if hasattr(self, 'tie_weights') and self.tie_weights != orig_tie:
                 del self.tie_weights
     transformers.modeling_utils.PreTrainedModel.init_weights = custom_init_weights
+    
+    # Also patch _finalize_model_loading as it calls tie_weights directly
+    if hasattr(transformers.modeling_utils.PreTrainedModel, "_finalize_model_loading"):
+        orig_finalize = transformers.modeling_utils.PreTrainedModel._finalize_model_loading
+        @classmethod
+        def custom_finalize(cls, model, *args, **kwargs):
+            orig_tie = apply_instance_tie_weights_wrapper(model)
+            try:
+                return orig_finalize.__func__(cls, model, *args, **kwargs)
+            finally:
+                if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
+                    del model.tie_weights
+        transformers.modeling_utils.PreTrainedModel._finalize_model_loading = custom_finalize
     
     # 3. Mock removed transformers.onnx module
     onnx_mock = ModuleType("transformers.onnx")
