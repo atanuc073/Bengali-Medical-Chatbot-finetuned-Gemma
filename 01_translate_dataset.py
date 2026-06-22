@@ -101,7 +101,10 @@ try:
         def custom_finalize(cls, model, *args, **kwargs):
             orig_tie = apply_instance_tie_weights_wrapper(model)
             try:
-                return orig_finalize.__func__(cls, model, *args, **kwargs)
+                if hasattr(orig_finalize, '__func__'):
+                    return orig_finalize.__func__(cls, model, *args, **kwargs)
+                else:
+                    return orig_finalize(cls, model, *args, **kwargs)
             finally:
                 if hasattr(model, 'tie_weights') and model.tie_weights != orig_tie:
                     del model.tie_weights
