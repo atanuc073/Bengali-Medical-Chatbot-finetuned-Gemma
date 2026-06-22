@@ -14,6 +14,16 @@ import argparse
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+# Workaround for compatibility between newer transformers versions and IndicTransToolkit
+try:
+    import sys
+    import transformers.tokenization_utils_base
+    import transformers.tokenization_utils
+    transformers.tokenization_utils.PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
+    sys.modules['transformers.tokenization_utils'].PreTrainedTokenizerBase = transformers.tokenization_utils_base.PreTrainedTokenizerBase
+except Exception:
+    pass
+
 from IndicTransToolkit.processor import IndicProcessor
 
 # ─────────────────────────────── Config ───────────────────────────────
