@@ -31,6 +31,16 @@ try:
     onnx_mock.OnnxConfig = DummyConfig
     onnx_mock.OnnxSeq2SeqConfigWithPast = DummyConfig
     sys.modules["transformers.onnx"] = onnx_mock
+    
+    # 3. Mock transformers.onnx.utils submodule
+    onnx_utils_mock = ModuleType("transformers.onnx.utils")
+    def compute_effective_axis_dimension(*args, **kwargs):
+        pass
+    onnx_utils_mock.compute_effective_axis_dimension = compute_effective_axis_dimension
+    sys.modules["transformers.onnx.utils"] = onnx_utils_mock
+    
+    # Enable attribute access: transformers.onnx.utils
+    onnx_mock.utils = onnx_utils_mock
 except Exception:
     pass
 
