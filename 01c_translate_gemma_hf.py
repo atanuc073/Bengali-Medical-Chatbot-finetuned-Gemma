@@ -22,6 +22,7 @@ import json
 import time
 import argparse
 import torch
+from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -260,10 +261,17 @@ def main():
 
     # ── Translate in batches ──
     mode = "a" if args.resume and start_idx > 0 else "w"
-    start_time = time.time()
+    batch_indices = list(range(start_idx, total, effective_batch_size))
+
+    pbar = tqdm(
+        batch_indices,
+        desc="Translating",
+        unit="batch",
+        total=len(batch_indices),
+    )
 
     with open(OUTPUT_FILE, mode, encoding="utf-8") as out_f:
-        for i in range(start_idx, total, effective_batch_size):
+        for i in pbar:
             batch_end = min(i + effective_batch_size, total)
             batch_rows = dataset[i:batch_end]
 
@@ -294,17 +302,10 @@ def main():
             with open(CHECKPOINT_FILE, "w") as ckpt_f:
                 json.dump({"last_processed": batch_end}, ckpt_f)
 
-            elapsed = time.time() - start_time
-            progress = (batch_end / total) * 100
-            samples_done = batch_end - start_idx
-            rate = samples_done / elapsed if elapsed > 0 else 0
-            eta_s = (total - batch_end) / rate if rate > 0 else 0
-            eta_m = eta_s / 60
-
-            print(
-                f"[{progress:5.1f}%] {batch_end}/{total} | "
-                f"{rate:.1f} samples/s | ETA: {eta_m:.0f} min"
-            )
+            pbar.set_postfix({
+                "done": f"{batch_end}/{total}",
+                "samples/s": f"{(batch_end - start_idx) / pbar.format_dict['elapsed']:.1f}" if pbar.format_dict.get('elapsed', 0) > 0 else "...",
+            })
 
     print(f"\n✅ Translation complete! Saved locally to: {OUTPUT_FILE}")
     print(f"   Total translated: {total - start_idx} rows")
