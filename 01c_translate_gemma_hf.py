@@ -35,7 +35,7 @@ OUTPUT_DIR = "data"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "bengali_medical_dataset.jsonl")
 CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "translation_checkpoint.json")
 
-BATCH_SIZE = 4  # per GPU — kept small due to long generation lengths
+BATCH_SIZE = 8  # per GPU
 
 SYSTEM_PROMPT = """You are an expert English-to-Bengali medical translator.
 
@@ -174,7 +174,7 @@ def generate_on_device(prompts, model, tokenizer, device):
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=1024,
+            max_new_tokens=512,
             do_sample=False,
             repetition_penalty=1.2,
             pad_token_id=tokenizer.pad_token_id,
@@ -262,6 +262,7 @@ def main():
     # ── Translate in batches ──
     mode = "a" if args.resume and start_idx > 0 else "w"
     batch_indices = list(range(start_idx, total, effective_batch_size))
+    instruction_cache = {}  # Cache repeated instructions (they're mostly identical)
 
     pbar = tqdm(
         batch_indices,
@@ -279,8 +280,16 @@ def main():
             inputs_text = batch_rows["input"]
             outputs_text = batch_rows["output"]
 
-            # Translate each field
-            bn_instructions = translate_batch(instructions, models, tokenizer)
+            # Translate each field (skip instruction if cached)
+            bn_instructions = []
+            for inst in instructions:
+                if inst in instruction_cache:
+                    bn_instructions.append(instruction_cache[inst])
+                else:
+                    translated = translate_batch([inst], models, tokenizer)[0]
+                    instruction_cache[inst] = translated
+                    bn_instructions.append(translated)
+
             bn_inputs = translate_batch(inputs_text, models, tokenizer)
             bn_outputs = translate_batch(outputs_text, models, tokenizer)
 
