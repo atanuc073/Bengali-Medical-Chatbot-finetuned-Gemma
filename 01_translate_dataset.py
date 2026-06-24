@@ -261,24 +261,7 @@ def load_translation_model(hf_token=None):
     return models, tokenizer, ip
 
 
-def _translate_subset(sentences, model, tokenizer, ip, device):
-    if not sentences:
-        return []
-
-    # Pre-process
-    batch = ip.preprocess_batch(sentences, src_lang=SRC_LANG, tgt_lang=TGT_LANG)
-
-    # Tokenize
-    inputs = tokenizer(
-        batch,
-        truncation=True,
-        padding="longest",
-        max_length=MAX_LENGTH,
-        return_tensors="pt",
-        return_attention_mask=True
-    ).to(device)
-
-    # Generate
+def _generate_only(inputs, model):
     with torch.no_grad():
         generated_tokens = model.generate(
             **inputs,
@@ -288,11 +271,7 @@ def _translate_subset(sentences, model, tokenizer, ip, device):
             num_beams=5,
             num_return_sequences=1,
         )
-
-    # Decode & post-process
-    decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-    translations = ip.postprocess_batch(decoded, lang=TGT_LANG)
-    return translations
+    return generated_tokens
 
 
 def translate_batch(sentences, models, tokenizer, ip):
@@ -300,27 +279,49 @@ def translate_batch(sentences, models, tokenizer, ip):
     if not sentences:
         return []
 
+    # 1. Pre-process and Tokenize sequentially in the main thread
+    batch = ip.preprocess_batch(sentences, src_lang=SRC_LANG, tgt_lang=TGT_LANG)
+    inputs = tokenizer(
+        batch,
+        truncation=True,
+        padding="longest",
+        max_length=MAX_LENGTH,
+        return_tensors="pt",
+        return_attention_mask=True
+    )
+
+    # 2. Distribute only the generation across GPUs
+    batch_size = len(sentences)
     if len(models) == 1:
-        return _translate_subset(sentences, models[0], tokenizer, ip, models[0].device)
-    
-    # Split batch across available GPUs
-    from concurrent.futures import ThreadPoolExecutor
-    
-    chunk_size = (len(sentences) + len(models) - 1) // len(models)
-    chunks = [sentences[i:i + chunk_size] for i in range(0, len(sentences), chunk_size)]
-    
-    tasks = []
-    with ThreadPoolExecutor(max_workers=len(models)) as executor:
-        for i, chunk in enumerate(chunks):
-            if i < len(models):
-                model = models[i]
-                tasks.append(executor.submit(_translate_subset, chunk, model, tokenizer, ip, model.device))
-    
-    results = []
-    for task in tasks:
-        results.extend(task.result())
+        inputs_device = {k: v.to(models[0].device) for k, v in inputs.items()}
+        generated_tokens = _generate_only(inputs_device, models[0])
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        chunk_size = (batch_size + len(models) - 1) // len(models)
         
-    return results
+        input_chunks = []
+        for i in range(0, batch_size, chunk_size):
+            chunk_inputs = {k: v[i:i+chunk_size] for k, v in inputs.items()}
+            input_chunks.append(chunk_inputs)
+            
+        tasks = []
+        with ThreadPoolExecutor(max_workers=len(models)) as executor:
+            for i, chunk_inputs in enumerate(input_chunks):
+                if i < len(models):
+                    model = models[i]
+                    chunk_inputs_device = {k: v.to(model.device) for k, v in chunk_inputs.items()}
+                    tasks.append(executor.submit(_generate_only, chunk_inputs_device, model))
+        
+        generated_tokens_list = []
+        for task in tasks:
+            generated_tokens_list.append(task.result())
+            
+        generated_tokens = torch.cat(generated_tokens_list, dim=0)
+
+    # 3. Decode & post-process sequentially in the main thread
+    decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+    translations = ip.postprocess_batch(decoded, lang=TGT_LANG)
+    return translations
 
 
 def main():
