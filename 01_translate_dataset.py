@@ -127,6 +127,7 @@ try:
     onnx_mock = ModuleType("transformers.onnx")
     class DummyConfig: pass
     onnx_mock.OnnxConfig = DummyConfig
+    onnx_mock.OnnxConfigWithPast = DummyConfig
     onnx_mock.OnnxSeq2SeqConfigWithPast = DummyConfig
     sys.modules["transformers.onnx"] = onnx_mock
     
