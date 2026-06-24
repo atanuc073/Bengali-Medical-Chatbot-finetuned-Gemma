@@ -314,7 +314,7 @@ def translate_batch(sentences, models, tokenizer, ip):
         
         generated_tokens_list = []
         for task in tasks:
-            generated_tokens_list.append(task.result())
+            generated_tokens_list.append(task.result().cpu())
             
         generated_tokens = torch.cat(generated_tokens_list, dim=0)
 
