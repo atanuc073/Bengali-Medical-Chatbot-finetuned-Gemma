@@ -392,7 +392,6 @@ def main():
     if args.push_to_hub and args.hub_repo_id:
         print(f"\nUploading dataset to Hugging Face Hub ({args.hub_repo_id})...")
         try:
-            from datasets import load_dataset
             final_dataset = load_dataset("json", data_files=OUTPUT_FILE, split="train")
             final_dataset.push_to_hub(args.hub_repo_id, token=args.hf_token or os.environ.get("HF_TOKEN"))
             print(f"✅ Successfully pushed to https://huggingface.co/datasets/{args.hub_repo_id}")
