@@ -196,6 +196,10 @@ def parse_args():
                         help="Resume from last checkpoint")
     parser.add_argument("--hf_token", type=str, default=None,
                         help="HuggingFace token for gated repositories")
+    parser.add_argument("--push_to_hub", action="store_true",
+                        help="Push the translated dataset to Hugging Face Hub when complete")
+    parser.add_argument("--hub_repo_id", type=str, default=None,
+                        help="Hugging Face repo ID to push to (e.g. username/dataset_name)")
     return parser.parse_args()
 
 
@@ -382,8 +386,18 @@ def main():
             progress = (batch_end / total) * 100
             print(f"[{progress:5.1f}%] Translated {batch_end}/{total} samples")
 
-    print(f"\n✅ Translation complete! Saved to: {OUTPUT_FILE}")
+    print(f"\n✅ Translation complete! Saved locally to: {OUTPUT_FILE}")
     print(f"   Total translated: {total - start_idx} rows")
+
+    if args.push_to_hub and args.hub_repo_id:
+        print(f"\nUploading dataset to Hugging Face Hub ({args.hub_repo_id})...")
+        try:
+            from datasets import load_dataset
+            final_dataset = load_dataset("json", data_files=OUTPUT_FILE, split="train")
+            final_dataset.push_to_hub(args.hub_repo_id, token=args.hf_token or os.environ.get("HF_TOKEN"))
+            print(f"✅ Successfully pushed to https://huggingface.co/datasets/{args.hub_repo_id}")
+        except Exception as e:
+            print(f"⚠️ Failed to push to Hugging Face Hub: {e}")
 
 
 if __name__ == "__main__":
