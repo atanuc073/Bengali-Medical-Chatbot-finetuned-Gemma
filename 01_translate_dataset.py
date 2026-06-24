@@ -225,20 +225,39 @@ def load_translation_model(hf_token=None):
 
     print(f"Loading IndicTrans2 model: {MODEL_NAME} ...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True, token=token)
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        MODEL_NAME,
-        trust_remote_code=True,
-        torch_dtype=torch.float16,
-        token=token
-    ).to(DEVICE)
-    model.eval()
     ip = IndicProcessor(inference=True)
-    print("Model loaded successfully!")
-    return model, tokenizer, ip
+    
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    models = []
+    
+    if num_gpus > 1:
+        print(f"Found {num_gpus} GPUs. Loading model on each GPU for data parallelism...")
+        for i in range(num_gpus):
+            print(f"Loading model on cuda:{i} ...")
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                MODEL_NAME,
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+                token=token
+            ).to(f"cuda:{i}")
+            model.eval()
+            models.append(model)
+    else:
+        print(f"Loading model on {DEVICE} ...")
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            token=token
+        ).to(DEVICE)
+        model.eval()
+        models.append(model)
+
+    print("Models loaded successfully!")
+    return models, tokenizer, ip
 
 
-def translate_batch(sentences, model, tokenizer, ip):
-    """Translate a batch of English sentences to Bengali."""
+def _translate_subset(sentences, model, tokenizer, ip, device):
     if not sentences:
         return []
 
@@ -253,7 +272,7 @@ def translate_batch(sentences, model, tokenizer, ip):
         max_length=MAX_LENGTH,
         return_tensors="pt",
         return_attention_mask=True
-    ).to(DEVICE)
+    ).to(device)
 
     # Generate
     with torch.no_grad():
@@ -270,6 +289,34 @@ def translate_batch(sentences, model, tokenizer, ip):
     decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
     translations = ip.postprocess_batch(decoded, lang=TGT_LANG)
     return translations
+
+
+def translate_batch(sentences, models, tokenizer, ip):
+    """Translate a batch of English sentences to Bengali."""
+    if not sentences:
+        return []
+
+    if len(models) == 1:
+        return _translate_subset(sentences, models[0], tokenizer, ip, models[0].device)
+    
+    # Split batch across available GPUs
+    from concurrent.futures import ThreadPoolExecutor
+    
+    chunk_size = (len(sentences) + len(models) - 1) // len(models)
+    chunks = [sentences[i:i + chunk_size] for i in range(0, len(sentences), chunk_size)]
+    
+    tasks = []
+    with ThreadPoolExecutor(max_workers=len(models)) as executor:
+        for i, chunk in enumerate(chunks):
+            if i < len(models):
+                model = models[i]
+                tasks.append(executor.submit(_translate_subset, chunk, model, tokenizer, ip, model.device))
+    
+    results = []
+    for task in tasks:
+        results.extend(task.result())
+        
+    return results
 
 
 def main():
@@ -294,13 +341,16 @@ def main():
         print(f"Resuming from index {start_idx}")
 
     # ── Load model ──
-    model, tokenizer, ip = load_translation_model(hf_token=args.hf_token)
+    models, tokenizer, ip = load_translation_model(hf_token=args.hf_token)
+    num_gpus = len(models)
+    effective_batch_size = args.batch_size * num_gpus
+    print(f"Using effective batch size of {effective_batch_size} across {num_gpus} GPU(s).")
 
     # ── Translate in batches ──
     mode = "a" if args.resume and start_idx > 0 else "w"
     with open(OUTPUT_FILE, mode, encoding="utf-8") as out_f:
-        for i in range(start_idx, total, args.batch_size):
-            batch_end = min(i + args.batch_size, total)
+        for i in range(start_idx, total, effective_batch_size):
+            batch_end = min(i + effective_batch_size, total)
             batch_rows = dataset[i:batch_end]
 
             # Collect texts to translate
@@ -309,9 +359,9 @@ def main():
             outputs_text = batch_rows["output"]
 
             # Translate each field
-            bn_instructions = translate_batch(instructions, model, tokenizer, ip)
-            bn_inputs = translate_batch(inputs_text, model, tokenizer, ip)
-            bn_outputs = translate_batch(outputs_text, model, tokenizer, ip)
+            bn_instructions = translate_batch(instructions, models, tokenizer, ip)
+            bn_inputs = translate_batch(inputs_text, models, tokenizer, ip)
+            bn_outputs = translate_batch(outputs_text, models, tokenizer, ip)
 
             # Write translated rows
             for j in range(len(bn_instructions)):
