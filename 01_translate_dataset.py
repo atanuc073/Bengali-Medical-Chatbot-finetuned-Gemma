@@ -311,15 +311,12 @@ def translate_batch(sentences, models, tokenizer, ip):
                     model = models[i]
                     chunk_inputs_device = {k: v.to(model.device) for k, v in chunk_inputs.items()}
                     tasks.append(executor.submit(_generate_only, chunk_inputs_device, model))
-        
-        generated_tokens_list = []
+        decoded = []
         for task in tasks:
-            generated_tokens_list.append(task.result().cpu())
-            
-        generated_tokens = torch.cat(generated_tokens_list, dim=0)
+            chunk_tokens = task.result().cpu()
+            decoded.extend(tokenizer.batch_decode(chunk_tokens, skip_special_tokens=True))
 
-    # 3. Decode & post-process sequentially in the main thread
-    decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+    # 3. Post-process sequentially in the main thread
     translations = ip.postprocess_batch(decoded, lang=TGT_LANG)
     return translations
 
