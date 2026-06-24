@@ -174,9 +174,8 @@ def generate_on_device(prompts, model, tokenizer, device):
         outputs = model.generate(
             **inputs,
             max_new_tokens=1024,
-            temperature=0.3,
-            top_p=0.9,
-            do_sample=True,
+            do_sample=False,
+            repetition_penalty=1.2,
             pad_token_id=tokenizer.pad_token_id,
         )
 
