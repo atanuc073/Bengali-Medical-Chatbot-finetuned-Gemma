@@ -4,7 +4,7 @@
 # ── Step 2: Then install these ──
 unsloth
 unsloth_zoo
-transformers>=4.51.0
+transformers==4.53.2
 accelerate>=0.25.0
 bitsandbytes>=0.41.0
 datasets>=2.14.0
