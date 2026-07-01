@@ -80,6 +80,10 @@ def parse_args():
         "--hub_repo_id", type=str, default=None,
         help="Hugging Face repo ID (e.g. Atanuc73/Bengali-Medical-Chatbot-Dataset)"
     )
+    parser.add_argument(
+        "--test", action="store_true",
+        help="Run a quick translation test with one sample and exit"
+    )
     return parser.parse_args()
 
 
@@ -112,6 +116,8 @@ def load_models(token):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    # Left-padding is mandatory for batched generation with decoder-only models
+    tokenizer.padding_side = "left"
 
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     models = []
@@ -144,7 +150,11 @@ def load_models(token):
 
 
 def build_prompt(text, tokenizer):
-    """Build a chat-formatted prompt for translation."""
+    """Build a chat-formatted prompt for translation.
+
+    Embeds the system prompt in the user message for maximum compatibility
+    across different transformers versions and chat templates.
+    """
     messages = [
         {"role": "user", "content": f"{SYSTEM_PROMPT}\n\nTranslate the following to Bengali:\n\n{text}"},
     ]
@@ -156,34 +166,62 @@ def build_prompt(text, tokenizer):
     return prompt
 
 
+MAX_GENERATION_RETRIES = 2
+
+
 def generate_on_device(prompts, model, tokenizer, device):
-    """Run generation for a list of prompts on a specific GPU."""
+    """Run generation for a list of prompts on a specific GPU.
+
+    Processes prompts one at a time to avoid padding/stripping issues
+    that cause empty outputs with decoder-only models.
+    """
     if not prompts:
         return []
 
-    inputs = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=1024,
-    ).to(device)
+    results = []
+    for prompt in prompts:
+        result = _generate_single(prompt, model, tokenizer, device)
+        results.append(result)
+    return results
 
-    input_length = inputs["input_ids"].shape[1]
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=512,
-            do_sample=False,
-            repetition_penalty=1.2,
-            pad_token_id=tokenizer.pad_token_id,
-        )
+def _generate_single(prompt, model, tokenizer, device, retries=MAX_GENERATION_RETRIES):
+    """Generate translation for a single prompt with retry logic."""
+    for attempt in range(retries + 1):
+        try:
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=2048,
+            ).to(device)
 
-    # Decode only the newly generated tokens (strip the prompt)
-    generated = outputs[:, input_length:]
-    decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
-    return [t.strip() for t in decoded]
+            input_length = inputs["input_ids"].shape[1]
+
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    repetition_penalty=1.2,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+
+            # Strip the prompt tokens — exact for single (non-padded) inputs
+            generated = outputs[:, input_length:]
+            decoded = tokenizer.decode(generated[0], skip_special_tokens=True).strip()
+
+            if decoded:
+                return decoded
+            else:
+                print(f"  ⚠️ Empty output on attempt {attempt + 1}/{retries + 1}, retrying...")
+        except Exception as e:
+            print(f"  ❌ Generation error on attempt {attempt + 1}/{retries + 1}: {e}")
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+
+    print("  ❌ All retries failed, returning empty string.")
+    return ""
 
 
 def translate_batch(texts, models, tokenizer):
@@ -229,6 +267,32 @@ def translate_batch(texts, models, tokenizer):
     return final
 
 
+def run_quick_test(models, tokenizer):
+    """Translate a single test sentence to verify the pipeline works."""
+    test_en = "The patient has been diagnosed with diabetes and prescribed Metformin 500mg twice daily."
+    print("\n" + "="*70)
+    print("🧪 QUICK TEST — translating one English sentence to Bengali")
+    print("="*70)
+    print(f"\n📝 English input:\n   {test_en}\n")
+
+    result = translate_batch([test_en], models, tokenizer)
+    bn_text = result[0] if result else "<EMPTY>"
+
+    print(f"🇧🇩 Bengali output:\n   {bn_text}\n")
+    print("="*70)
+
+    if not bn_text or bn_text == "<EMPTY>":
+        print("❌ TEST FAILED: Model returned empty output!")
+        print("   Possible causes:")
+        print("   - Model not fully loaded / wrong dtype")
+        print("   - transformers version incompatible (need >=4.49.0)")
+        print("   - Chat template issue")
+        return False
+    else:
+        print("✅ TEST PASSED: Model is generating Bengali text.")
+        return True
+
+
 def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -241,6 +305,11 @@ def main():
     num_gpus = len(models)
     effective_batch_size = args.batch_size * num_gpus
     print(f"Using effective batch size of {effective_batch_size} across {num_gpus} GPU(s).")
+
+    # ── Quick test mode ──
+    if args.test:
+        success = run_quick_test(models, tokenizer)
+        raise SystemExit(0 if success else 1)
 
     # ── Load dataset ──
     print("Loading ChatDoctor-HealthCareMagic-100k dataset ...")
@@ -292,6 +361,20 @@ def main():
 
             bn_inputs = translate_batch(inputs_text, models, tokenizer)
             bn_outputs = translate_batch(outputs_text, models, tokenizer)
+
+            # Diagnostic: print first sample from first batch
+            if i == start_idx and bn_inputs:
+                print("\n" + "─"*60)
+                print("📋 FIRST SAMPLE DIAGNOSTIC:")
+                print(f"  EN input  : {inputs_text[0][:120]}...")
+                print(f"  BN input  : {bn_inputs[0][:120]}...")
+                print(f"  EN output : {outputs_text[0][:120]}...")
+                print(f"  BN output : {bn_outputs[0][:120]}...")
+                if not bn_inputs[0] or not bn_outputs[0]:
+                    print("  ⚠️ WARNING: Bengali translation is EMPTY! Check model/prompt.")
+                else:
+                    print("  ✅ Bengali text generated successfully.")
+                print("─"*60 + "\n")
 
             # Write rows
             for j in range(len(bn_instructions)):
