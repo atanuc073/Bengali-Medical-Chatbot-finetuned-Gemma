@@ -149,72 +149,90 @@ def load_models(token):
     return models, tokenizer
 
 
-def build_prompt(text, tokenizer):
-    """Build a chat-formatted prompt for translation.
-
-    Embeds the system prompt in the user message for maximum compatibility
-    across different transformers versions and chat templates.
-    """
-    messages = [
-        {"role": "user", "content": f"{SYSTEM_PROMPT}\n\nTranslate the following to Bengali:\n\n{text}"},
-    ]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    return prompt
-
-
 MAX_GENERATION_RETRIES = 2
 
+# Track how many generations we've done (for debug output)
+_generation_count = 0
 
-def generate_on_device(prompts, model, tokenizer, device):
-    """Run generation for a list of prompts on a specific GPU.
 
-    Processes prompts one at a time to avoid padding/stripping issues
-    that cause empty outputs with decoder-only models.
+def _build_messages(text):
+    """Build chat messages for translation (NOT tokenized yet)."""
+    return [
+        {"role": "user", "content": f"{SYSTEM_PROMPT}\n\nTranslate the following to Bengali:\n\n{text}"},
+    ]
+
+
+def generate_on_device(texts, model, tokenizer, device):
+    """Run generation for a list of texts on a specific GPU.
+
+    Processes texts one at a time. Each text is tokenized directly via
+    apply_chat_template(tokenize=True) to preserve special token boundaries.
     """
-    if not prompts:
+    if not texts:
         return []
 
     results = []
-    for prompt in prompts:
-        result = _generate_single(prompt, model, tokenizer, device)
+    for text in texts:
+        result = _generate_single(text, model, tokenizer, device)
         results.append(result)
     return results
 
 
-def _generate_single(prompt, model, tokenizer, device, retries=MAX_GENERATION_RETRIES):
-    """Generate translation for a single prompt with retry logic."""
+def _generate_single(text, model, tokenizer, device, retries=MAX_GENERATION_RETRIES):
+    """Generate translation for a single text with retry logic.
+
+    Uses apply_chat_template(tokenize=True) directly instead of the broken
+    two-step process (template→string→re-tokenize) which corrupts special tokens.
+    """
+    global _generation_count
+    messages = _build_messages(text)
+
     for attempt in range(retries + 1):
         try:
-            inputs = tokenizer(
-                prompt,
+            # ──────────────────────────────────────────────────────────────
+            # KEY FIX: tokenize=True ensures <start_of_turn>, <end_of_turn>,
+            # <bos> etc. are encoded as proper special token IDs, not as
+            # sub-word pieces of their text representation.
+            # ──────────────────────────────────────────────────────────────
+            input_ids = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
                 return_tensors="pt",
-                truncation=True,
-                max_length=2048,
             ).to(device)
 
-            input_length = inputs["input_ids"].shape[1]
+            input_length = input_ids.shape[1]
 
             with torch.no_grad():
                 outputs = model.generate(
-                    **inputs,
+                    input_ids,
                     max_new_tokens=512,
-                    do_sample=False,
-                    repetition_penalty=1.2,
+                    do_sample=True,
+                    temperature=0.3,
                     pad_token_id=tokenizer.pad_token_id,
                 )
 
-            # Strip the prompt tokens — exact for single (non-padded) inputs
+            # Strip the prompt tokens
             generated = outputs[:, input_length:]
             decoded = tokenizer.decode(generated[0], skip_special_tokens=True).strip()
+
+            # Debug output for first 3 generations
+            _generation_count += 1
+            if _generation_count <= 3:
+                raw = tokenizer.decode(generated[0], skip_special_tokens=False)
+                print(f"\n  🔍 [DEBUG gen #{_generation_count}]")
+                print(f"     Input tokens : {input_length}")
+                print(f"     Output tokens: {generated.shape[1]}")
+                print(f"     Raw output   : {repr(raw[:300])}")
+                print(f"     Decoded      : {decoded[:200]}")
 
             if decoded:
                 return decoded
             else:
-                print(f"  ⚠️ Empty output on attempt {attempt + 1}/{retries + 1}, retrying...")
+                raw = tokenizer.decode(generated[0], skip_special_tokens=False)
+                print(f"  ⚠️ Empty output on attempt {attempt + 1}/{retries + 1}")
+                print(f"     Input tokens: {input_length}, Generated tokens: {generated.shape[1]}")
+                print(f"     Raw (with special tokens): {repr(raw[:300])}")
         except Exception as e:
             print(f"  ❌ Generation error on attempt {attempt + 1}/{retries + 1}: {e}")
             if "out of memory" in str(e).lower():
@@ -236,19 +254,16 @@ def translate_batch(texts, models, tokenizer):
     if not non_empty_texts:
         return [""] * len(texts)
 
-    # Build prompts
-    prompts = [build_prompt(t, tokenizer) for t in non_empty_texts]
-
-    # Distribute across GPUs
+    # Distribute across GPUs (pass raw texts, not pre-built prompts)
     if len(models) == 1:
-        results = generate_on_device(prompts, models[0], tokenizer, models[0].device)
+        results = generate_on_device(non_empty_texts, models[0], tokenizer, models[0].device)
     else:
-        chunk_size = (len(prompts) + len(models) - 1) // len(models)
-        prompt_chunks = [prompts[i:i + chunk_size] for i in range(0, len(prompts), chunk_size)]
+        chunk_size = (len(non_empty_texts) + len(models) - 1) // len(models)
+        text_chunks = [non_empty_texts[i:i + chunk_size] for i in range(0, len(non_empty_texts), chunk_size)]
 
         tasks = []
         with ThreadPoolExecutor(max_workers=len(models)) as executor:
-            for i, chunk in enumerate(prompt_chunks):
+            for i, chunk in enumerate(text_chunks):
                 if i < len(models):
                     model = models[i]
                     tasks.append(
